@@ -1,0 +1,30 @@
+
+fips_endpoint = f"https://s3-fips.{REGION}.amazonaws.com"
+fips_client = s3_client(fips_endpoint)
+
+try:
+    fips_url = fips_client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": BUCKET, "Key": key},
+        ExpiresIn=900,
+        HttpMethod="GET"
+    )
+
+    response = requests.get(fips_url, timeout=30)
+
+    success = (
+        response.status_code == 200
+        and response.content == TEST_DATA
+    )
+
+    record(
+        "S3 FIPS GET",
+        "PASS" if success else "FAIL",
+        safe_host(fips_url),
+        f"HTTP {response.status_code}; "
+        f"Content verified={success}"
+    )
+
+except Exception as e:
+    record("S3 FIPS GET", "FAIL",
+           fips_endpoint, type(e).__name__)
