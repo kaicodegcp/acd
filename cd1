@@ -1,0 +1,22 @@
+key = f"{PREFIX}/standard-test.txt"
+
+
+import socket
+
+hosts = [
+    f"s3-fips.{REGION}.amazonaws.com",
+    FIPS_VPCE_HOST
+]
+
+for host in hosts:
+    try:
+        addresses = sorted({
+            item[4][0]
+            for item in socket.getaddrinfo(
+                host, 443, type=socket.SOCK_STREAM
+            )
+        })
+        print(f"{host}: {addresses}")
+    except Exception as e:
+        print(f"{host}: DNS FAILED - {type(e).__name__}")
+  
