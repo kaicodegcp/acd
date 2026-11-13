@@ -1,0 +1,124 @@
+Databricks Notebook Testing – S3 Pre-Signed URLs, VPC Interface Endpoint, and S3 FIPS
+You can validate these scenarios from a Databricks notebook running on AWS and provide the S3 team with execution results, HTTP response codes, endpoint details, and AWS-side evidence.
+
+However, there is an important distinction:
+
+A successful S3 read or write does not automatically prove that a pre-signed URL, VPC Interface Endpoint, or FIPS endpoint was used. Each scenario needs separate validation.
+1. Test scenarios and expected evidence
+Scenario	What to validate	Expected result
+1. Standard S3 pre-signed GET	Read an S3 object using a signed HTTPS URL	HTTP 200
+2. Standard S3 pre-signed PUT	Upload an object using a signed HTTPS URL	HTTP 200
+3. S3 VPC Interface pre-signed GET	Access S3 through the intended interface endpoint	HTTP 200 + VPC endpoint evidence
+4. S3 VPC Interface pre-signed PUT	Upload through the intended interface endpoint	HTTP 200 + VPC endpoint evidence
+5. S3 FIPS pre-signed GET	Read using an S3 FIPS hostname	HTTP 200 + FIPS hostname evidence
+6. S3 FIPS pre-signed PUT	Upload using an S3 FIPS hostname	HTTP 200 + FIPS hostname evidence
+7. Negative test	Expired or invalid pre-signed URL	HTTP 403
+
+For each successful scenario, collect the request timestamp, Databricks workspace and compute details, S3 bucket/key, sanitized endpoint hostname, HTTP status, and the supporting network logs.
+2. Prerequisites
+Before testing, obtain the following information from the S3 team:
+- Test bucket name, AWS region, and permitted test prefix.
+- Standard S3 and S3 FIPS endpoint configuration.
+- VPC endpoint ID and whether this is an S3 interface endpoint or gateway endpoint.
+- Permissions for s3:GetObject and s3:PutObject.
+- Confirmation of the intended Databricks workspace, serverless compute, and NCC configuration.
+For Databricks Serverless, verify that the appropriate S3 and S3 FIPS private endpoint rules are configured and the NCC is attached to the workspace. Databricks supports private connectivity to S3 FIPS in supported US and Canada regions, with same-region requirements for FIPS. 
+Databricks on AWS+1
+
+3. Create a Databricks notebook
+Create a notebook named S3_Presigned_Endpoint_Validation, attach it to the target compute, and execute the following Python cells.
+Cell 1 – Configuration
+import boto3import requestsimport socketimport jsonimport hashlibfrom datetime import datetime, timezonefrom urllib.parse import urlsplitfrom botocore.config import ConfigREGION = "us-east-1"  # Change to your regionBUCKET = "your-test-bucket"PREFIX = "presigned-validation"# Only needed for explicit endpoint-specific testingVPC_ENDPOINT_DNS = (    "https://bucket.vpce-xxxxxxxx.s3."    "us-east-1.vpce.amazonaws.com")TEST_DATA = b"Databricks S3 presigned validation"RESULTS = []def record(name, status, hostname, detail):    entry = {        "timestamp_utc": datetime.now(            timezone.utc        ).isoformat(),        "scenario": name,        "status": status,        "hostname": hostname,        "detail": str(detail)[:500]    }    RESULTS.append(entry)    print(json.dumps(entry, indent=2))
+
+
+
+Do not print complete pre-signed URLs because their query parameters contain temporary authentication information. The notebook must have a valid AWS credential source if it is generating the URLs itself.
+Cell 2 – Standard S3 pre-signed PUT and GET
+client = s3_client()key = f"{PREFIX}/standard-test.txt"try:    put_url = client.generate_presigned_url(        "put_object",        Params={"Bucket": BUCKET, "Key": key},        ExpiresIn=900,        HttpMethod="PUT"    )    put_response = requests.put(        put_url, data=TEST_DATA, timeout=30    )    record(        "Standard S3 PUT",        "PASS" if put_response.status_code == 200 else "FAIL",        safe_host(put_url),        f"HTTP {put_response.status_code}"    )    get_url = client.generate_presigned_url(        "get_object",        Params={"Bucket": BUCKET, "Key": key},        ExpiresIn=900,        HttpMethod="GET"    )    get_response = requests.get(get_url, timeout=30)    success = (        get_response.status_code == 200        and get_response.content == TEST_DATA    )
+
+
+
+This validates that the generated SigV4 pre-signed URLs are usable for the specified operations. 
+Boto3 1.43.119 documentation+1
+
+Cell 3 – S3 FIPS pre-signed GET
+fips_endpoint = f"https://s3-fips.{REGION}.amazonaws.com"fips_client = s3_client(fips_endpoint)try:    fips_url = fips_client.generate_presigned_url(        "get_object",        Params={"Bucket": BUCKET, "Key": key},        ExpiresIn=900,        HttpMethod="GET"    )    response = requests.get(fips_url, timeout=30)    success = (        response.status_code == 200        and response.content == TEST_DATA    )    record(        "S3 FIPS GET",        "PASS" if success else "FAIL",        safe_host(fips_url),        f"HTTP {response.status_code}; "        f"Content verified={success}"    )except Exception as e:    record("S3 FIPS GET", "FAIL",           fips_endpoint, type(e).__name__)
+
+
+
+Expected signed hostname:
+
+your-test-bucket.s3-fips.us-east-1.amazonaws.com
+
+For private S3 FIPS connectivity, the S3 team must also verify that the traffic actually traversed the configured FIPS endpoint. An HTTP 200 response alone proves the FIPS hostname worked, not the complete private network path. 
+Databricks on AWS+1
+
+Cell 4 – S3 VPC Interface pre-signed GET
+Use this cell when testing an explicit endpoint-specific hostname, and only if that hostname is reachable from the notebook compute.
+vpce_client = s3_client(VPC_ENDPOINT_DNS)try:    vpce_url = vpce_client.generate_presigned_url(        "get_object",        Params={"Bucket": BUCKET, "Key": key},        ExpiresIn=900,        HttpMethod="GET"    )    response = requests.get(vpce_url, timeout=30)    success = (        response.status_code == 200        and response.content == TEST_DATA    )    record(        "S3 VPC Interface GET",        "PASS" if success else "FAIL",        safe_host(vpce_url),        f"HTTP {response.status_code}; "        f"Content verified={success}"    )except Exception as e:    record(        "S3 VPC Interface GET",        "FAIL",        VPC_ENDPOINT_DNS,        type(e).__name__    )
+
+
+
+AWS supports endpoint-specific S3 bucket hostnames for interface endpoints. However, do not assume the endpoint-specific hostname is the correct test for Databricks Serverless NCC. For that configuration, Databricks documents regional bucket hostnames such as bucket.s3.region.amazonaws.com and verifies the private path through NCC and AWS evidence. 
+Boto3 1.44.1 documentation+1
+
+Cell 5 – Generate a validation report
+from pyspark.sql import functions as Fresults_df = spark.createDataFrame(RESULTS)display(results_df)results_df.createOrReplaceTempView(    "s3_presigned_validation_results")
+
+
+
+You can now run a SQL query in another notebook cell:
+
+%sql
+SELECT
+    timestamp_utc,
+    scenario,
+    status,
+    hostname,
+    detail
+FROM s3_presigned_validation_results
+ORDER BY timestamp_utc;
+
+
+
+This provides the SQL-based evidence table for your S3 team.
+4. Validate using Databricks SQL and Unity Catalog
+If the S3 team also wants evidence of standard Databricks-to-S3 access, execute the following SQL using an approved external location.
+
+-- Verify external location metadata
+DESCRIBE EXTERNAL LOCATION
+  `your_external_location`;
+
+-- Validate SQL read access to an existing table
+SELECT COUNT(*)
+FROM your_catalog.your_schema.your_test_table;
+
+
+
+A successful query confirms that the configured Databricks access path works. It does not establish that the SQL engine used a pre-signed URL.
+
+For Serverless private connectivity, Databricks also documents validating access through an external location and SQL operations. 
+Databricks on AWS
+
+5. Evidence required from the AWS S3 team
+The notebook provides application-level evidence. Ask the S3 team to correlate it with AWS logs and configuration.
+Evidence	Who provides it
+Notebook run ID, timestamp, HTTP result	Databricks team
+Sanitized hostname and test object key	Databricks team
+S3 CloudTrail data event for GET/PUT	S3 team
+vpcEndpointId, where recorded	S3 team
+Interface endpoint ID, service and status	Network/S3 team
+VPC Flow Logs for endpoint ENIs, if enabled	Network team
+S3 FIPS service/hostname and endpoint configuration	S3 team
+
+For a complete sign-off, correlate the request timestamp and S3 object key with CloudTrail, and verify the intended VPC endpoint ID and private route. For FIPS, confirm the request targeted the FIPS endpoint and that the intended FIPS private endpoint was used.
+6. Final validation report
+S3 Pre-Signed Connectivity Validation
+Sample report
+
+Standard pre-signed GET/PUT	Pending execution
+VPC Interface GET/PUT	Pending execution
+S3 FIPS GET/PUT	Pending execution
+Private endpoint evidence	Pending AWS confirmation
+
+Do not mark any scenario PASS until its HTTP and required network evidence have been verified.
