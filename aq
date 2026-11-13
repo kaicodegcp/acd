@@ -1,0 +1,10 @@
+python3 aws_databricks_compliance.py \
+  --aws-profile default \
+  --aws-region us-east-1 \
+  --dbx-host https://accounts.cloud.databricks.com \
+  --dbx-account-id YOUR_ACCOUNT_ID \
+  --dbx-workspace-id YOUR_WORKSPACE_ID \
+  --dbx-client-id YOUR_CLIENT_ID \
+  --dbx-client-secret "$DBX_CLIENT_SECRET" \
+  --discover-dbx-root-bucket \
+  --output-json
